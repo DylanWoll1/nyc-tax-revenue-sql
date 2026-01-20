@@ -1,0 +1,266 @@
+CREATE DATABASE IF NOT EXISTS nyc_tax_revenue;
+USE nyc_tax_revenue;
+
+
+USE nyc_tax_revenue;
+
+CREATE TABLE IF NOT EXISTS stg_tax_revenue_actuals (
+  pub_dt  CHAR(8)       NOT NULL,
+  fisc_yr VARCHAR(10)   NOT NULL,
+  tx_nm   VARCHAR(150)  NOT NULL,
+  amt     DECIMAL(12,2) NOT NULL,
+  PRIMARY KEY (pub_dt, fisc_yr, tx_nm)
+);
+
+USE nyc_tax_revenue;
+
+CREATE TABLE IF NOT EXISTS dim_publication_date (
+  pub_dt_key INT AUTO_INCREMENT PRIMARY KEY,
+  pub_dt CHAR(8) NOT NULL,
+  pub_date DATE NOT NULL,
+  UNIQUE (pub_dt)
+);
+
+CREATE TABLE IF NOT EXISTS dim_fiscal_year (
+  fiscal_year_key INT AUTO_INCREMENT PRIMARY KEY,
+  fiscal_year INT NOT NULL,
+  UNIQUE (fiscal_year)
+);
+
+CREATE TABLE IF NOT EXISTS dim_tax (
+  tax_key INT AUTO_INCREMENT PRIMARY KEY,
+  tax_name VARCHAR(150) NOT NULL,
+  tax_category VARCHAR(50) NOT NULL,
+  UNIQUE (tax_name)
+);
+
+CREATE TABLE IF NOT EXISTS fact_tax_revenue (
+  pub_dt_key INT NOT NULL,
+  fiscal_year_key INT NOT NULL,
+  tax_key INT NOT NULL,
+  amount_millions DECIMAL(12,2) NOT NULL,
+  PRIMARY KEY (pub_dt_key, fiscal_year_key, tax_key),
+  FOREIGN KEY (pub_dt_key) REFERENCES dim_publication_date(pub_dt_key),
+  FOREIGN KEY (fiscal_year_key) REFERENCES dim_fiscal_year(fiscal_year_key),
+  FOREIGN KEY (tax_key) REFERENCES dim_tax(tax_key)
+);
+
+USE nyc_tax_revenue;
+
+CREATE INDEX idx_fact_tax ON fact_tax_revenue (tax_key);
+CREATE INDEX idx_fact_fy ON fact_tax_revenue (fiscal_year_key);
+CREATE INDEX idx_fact_pub ON fact_tax_revenue (pub_dt_key);
+
+USE nyc_tax_revenue;
+
+-- Check for missing or invalid values
+SELECT
+  SUM(pub_dt IS NULL) AS null_pub_dt,
+  SUM(fisc_yr IS NULL) AS null_fisc_yr,
+  SUM(tx_nm IS NULL) AS null_tax_name,
+  SUM(amt IS NULL) AS null_amt
+FROM stg_tax_revenue_actuals;
+
+-- Check duplicates (should be none because of PK, but validate source)
+SELECT pub_dt, fisc_yr, tx_nm, COUNT(*) AS cnt
+FROM stg_tax_revenue_actuals
+GROUP BY pub_dt, fisc_yr, tx_nm
+HAVING COUNT(*) > 1;
+
+-- Check for negative amounts (should not happen)
+SELECT *
+FROM stg_tax_revenue_actuals
+WHERE amt < 0;
+
+USE nyc_tax_revenue;
+
+START TRANSACTION;
+
+-- 1) DIM: publication date (insert only new natural keys)
+INSERT INTO dim_publication_date (pub_dt, pub_date)
+SELECT
+  x.pub_dt,
+  STR_TO_DATE(x.pub_dt, '%Y%m%d') AS pub_date
+FROM (
+  SELECT DISTINCT
+    LEFT(TRIM(pub_dt), 8) AS pub_dt
+  FROM stg_tax_revenue_actuals
+  WHERE pub_dt IS NOT NULL
+    AND TRIM(pub_dt) <> ''
+) x
+LEFT JOIN dim_publication_date d
+  ON d.pub_dt = x.pub_dt
+WHERE d.pub_dt IS NULL;
+
+-- 2) DIM: fiscal year (insert only new years)
+INSERT INTO dim_fiscal_year (fiscal_year)
+SELECT
+  x.fiscal_year
+FROM (
+  SELECT DISTINCT
+    CAST(TRIM(fisc_yr) AS UNSIGNED) AS fiscal_year
+  FROM stg_tax_revenue_actuals
+  WHERE fisc_yr IS NOT NULL
+    AND TRIM(fisc_yr) <> ''
+) x
+LEFT JOIN dim_fiscal_year fy
+  ON fy.fiscal_year = x.fiscal_year
+WHERE fy.fiscal_year IS NULL;
+
+-- 3) DIM: tax (insert only new tax names)
+INSERT INTO dim_tax (tax_name, tax_category)
+SELECT
+  x.tax_name,
+  CASE
+    WHEN x.tax_name = 'Sales and Use Tax' THEN 'Sales'
+    WHEN x.tax_name = 'Property Tax' THEN 'Property'
+    WHEN x.tax_name = 'Personal Income Tax' THEN 'Income'
+    WHEN x.tax_name LIKE '%Business%' THEN 'Business'
+    WHEN x.tax_name = 'All Other' THEN 'Other'
+    ELSE 'Other'
+  END AS tax_category
+FROM (
+  SELECT DISTINCT TRIM(tx_nm) AS tax_name
+  FROM stg_tax_revenue_actuals
+  WHERE tx_nm IS NOT NULL
+    AND TRIM(tx_nm) <> ''
+) x
+LEFT JOIN dim_tax t
+  ON t.tax_name = x.tax_name
+WHERE t.tax_name IS NULL;
+
+-- 4) FACT: insert only new fact rows
+INSERT INTO fact_tax_revenue (pub_dt_key, fiscal_year_key, tax_key, amount_millions)
+SELECT
+  d.pub_dt_key,
+  fy.fiscal_year_key,
+  t.tax_key,
+  s.amt
+FROM stg_tax_revenue_actuals s
+JOIN dim_publication_date d
+  ON d.pub_dt = LEFT(TRIM(s.pub_dt), 8)
+JOIN dim_fiscal_year fy
+  ON fy.fiscal_year = CAST(TRIM(s.fisc_yr) AS UNSIGNED)
+JOIN dim_tax t
+  ON t.tax_name = TRIM(s.tx_nm)
+LEFT JOIN fact_tax_revenue f
+  ON f.pub_dt_key = d.pub_dt_key
+ AND f.fiscal_year_key = fy.fiscal_year_key
+ AND f.tax_key = t.tax_key
+WHERE f.pub_dt_key IS NULL;
+COMMIT;
+
+(Checking for all data, correctly formated and not returing null vaules) 
+SELECT
+  d.pub_dt,
+  fy.fiscal_year,
+  t.tax_name,
+  SUM(f.amount_millions) AS total_amount
+FROM fact_tax_revenue f
+JOIN dim_publication_date d ON d.pub_dt_key = f.pub_dt_key
+JOIN dim_fiscal_year fy ON fy.fiscal_year_key = f.fiscal_year_key
+JOIN dim_tax t ON t.tax_key = f.tax_key
+GROUP BY d.pub_dt, fy.fiscal_year, t.tax_name
+ORDER BY d.pub_dt, t.tax_name
+LIMIT 30;
+
+USE nyc_tax_revenue;
+
+WITH sales AS (
+  SELECT
+    fy.fiscal_year,
+    SUM(f.amount_millions) AS sales_tax_m
+  FROM fact_tax_revenue f
+  JOIN dim_tax t ON f.tax_key = t.tax_key
+  JOIN dim_fiscal_year fy ON f.fiscal_year_key = fy.fiscal_year_key
+  WHERE t.tax_name = 'Sales and Use Tax'
+  GROUP BY fy.fiscal_year
+),
+yoy AS (
+  SELECT
+    fiscal_year,
+    sales_tax_m,
+    LAG(sales_tax_m) OVER (ORDER BY fiscal_year) AS prev_sales_tax_m
+  FROM sales
+)
+SELECT
+  fiscal_year,
+  sales_tax_m,
+  ROUND(((sales_tax_m - prev_sales_tax_m) / NULLIF(prev_sales_tax_m, 0)) * 100, 2) AS yoy_pct
+FROM yoy
+ORDER BY fiscal_year;
+
+USE nyc_tax_revenue;
+
+WITH totals AS (
+  SELECT
+    fy.fiscal_year,
+    SUM(f.amount_millions) AS total_tax_m
+  FROM fact_tax_revenue f
+  JOIN dim_fiscal_year fy ON f.fiscal_year_key = fy.fiscal_year_key
+  GROUP BY fy.fiscal_year
+),
+sales AS (
+  SELECT
+    fy.fiscal_year,
+    SUM(f.amount_millions) AS sales_tax_m
+  FROM fact_tax_revenue f
+  JOIN dim_tax t ON f.tax_key = t.tax_key
+  JOIN dim_fiscal_year fy ON f.fiscal_year_key = fy.fiscal_year_key
+  WHERE t.tax_name = 'Sales and Use Tax'
+  GROUP BY fy.fiscal_year
+)
+SELECT
+  t.fiscal_year,
+  s.sales_tax_m,
+  t.total_tax_m,
+  ROUND((s.sales_tax_m / NULLIF(t.total_tax_m, 0)) * 100, 2) AS sales_share_pct
+FROM totals t
+JOIN sales s ON s.fiscal_year = t.fiscal_year
+ORDER BY t.fiscal_year;
+
+USE nyc_tax_revenue;
+
+WITH by_tax AS (
+  SELECT
+    fy.fiscal_year,
+    t.tax_name,
+    SUM(f.amount_millions) AS amt_m
+  FROM fact_tax_revenue f
+  JOIN dim_tax t ON f.tax_key = t.tax_key
+  JOIN dim_fiscal_year fy ON f.fiscal_year_key = fy.fiscal_year_key
+  GROUP BY fy.fiscal_year, t.tax_name
+),
+deltas AS (
+  SELECT
+    fiscal_year,
+    tax_name,
+    amt_m,
+    amt_m - LAG(amt_m) OVER (PARTITION BY tax_name ORDER BY fiscal_year) AS yoy_delta_m
+  FROM by_tax
+)
+SELECT
+  fiscal_year,
+  tax_name,
+  amt_m,
+  yoy_delta_m
+FROM deltas
+WHERE yoy_delta_m IS NOT NULL
+ORDER BY fiscal_year, ABS(yoy_delta_m) DESC;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
