@@ -7,7 +7,8 @@ End-to-end SQL analytics project using NYC Open Data (Tax Revenue Actuals). Buil
 
 ## Dataset
 NYC Open Data: Tax Revenue Actuals (NYC)  
-(Include the dataset page link here)
+[New_York_City_Tax_Revenue_Actuals.csv](https://github.com/user-attachments/files/24725396/New_York_City_Tax_Revenue_Actuals.csv)
+
 
 ## What’s in this repo
 - `schema/` – DDL for staging + star schema, plus EER diagram image
