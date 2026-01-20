@@ -1,0 +1,23 @@
+nyc-tax-revenue-sql/
+  README.md
+  .gitignore
+  data/
+    raw/                    (optional; do not commit large CSVs)
+  schema/
+    01_create_database.sql
+    02_create_tables.sql
+    03_indexes_constraints.sql
+    04_build_dimensions_and_fact.sql
+  queries/
+    00_data_quality_checks.sql
+    01_transform_staging_to_star.sql
+    02_sales_tax_trend_yoy.sql
+    03_sales_tax_share_of_total.sql
+    04_total_change_drivers.sql
+  docs/
+    business_questions.md
+    data_dictionary.md
+  insights/
+    insights.md
+  images/
+    eer.png
